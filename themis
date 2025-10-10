@@ -142,38 +142,70 @@ done < <(squeue -h -p "$PARTITION" -o "%A %u %C %b %R")
 
 # --- 3. Progress bar (new rounding logic) ---
 progress_bar() {
-    local mine=$1 others=$2 total=$3 length=$4 base_len=$5 gray=${6:-0}
-    local used=$((mine + others))
-    local mine_len others_len free_len
+    local mine=$1
+    local others=$2
+    local total=$3
+    local length=$4
+    local base_len=$5
+    local gray=$6  # 1 se nodo non idle (barra grigia)
 
-    if (( total > 0 )); then
-        mine_len=$(awk -v m=$mine -v l=$length -v t=$total 'BEGIN{v=m*l/t; printf("%d",(v>0 && v<1)?1:int(v+0.5))}')
-        others_len=$(awk -v o=$others -v l=$length -v t=$total 'BEGIN{v=o*l/t; printf("%d",(v>0 && v<1)?1:int(v+0.5))}')
-        free_len=$((length - mine_len - others_len))
-        (( free_len < 0 )) && free_len=0
-    else
-        free_len=$length
+    (( total == 0 )) && total=1  # evita divisioni per zero
+
+    # --- proporzioni float ---
+    local mine_f=$(echo "$mine * $length / $total" | bc -l)
+    local others_f=$(echo "$others * $length / $total" | bc -l)
+    local free_f=$(echo "$length - ($mine_f + $others_f)" | bc -l)
+
+    # --- arrotondamento all’intero più vicino ---
+    local mine_i=$(printf "%.0f" "$mine_f")
+    local others_i=$(printf "%.0f" "$others_f")
+    local free_i=$(printf "%.0f" "$free_f")
+
+    # --- forza almeno 1 al più piccolo non nullo ---
+    if (( mine_i == 0 && mine > 0 )); then mine_i=1; fi
+    if (( others_i == 0 && others > 0 )); then others_i=1; fi
+    if (( free_i == 0 && (total - mine - others) > 0 )); then free_i=1; fi
+
+    # --- normalizza la somma ---
+    local sum=$((mine_i + others_i + free_i))
+    local diff=$((sum - length))
+    if (( diff != 0 )); then
+        # correggi togliendo o aggiungendo 1 al segmento più grande
+        if (( diff > 0 )); then
+            # troppo lunga → togli al più grande
+            if (( mine_i >= others_i && mine_i >= free_i && mine_i > 0 )); then ((mine_i -= diff))
+            elif (( others_i >= mine_i && others_i >= free_i && others_i > 0 )); then ((others_i -= diff))
+            else ((free_i -= diff)); fi
+        else
+            # troppo corta → aggiungi al più grande
+            (( diff = -diff ))
+            if (( mine_i >= others_i && mine_i >= free_i )); then ((mine_i += diff))
+            elif (( others_i >= mine_i && others_i >= free_i )); then ((others_i += diff))
+            else ((free_i += diff)); fi
+        fi
     fi
 
-    local percent=0
-    (( total > 0 )) && percent=$((100 * used / total))
+    # --- calcolo percentuale ---
+    local used=$((mine + others))
+    local percent=$((100 * used / total))
 
-    local open="[" close="]"
+    local open="["; local close="]"
     (( total > base_len )) && open="{" && close="}"
 
     echo -ne "$open"
     if (( gray )); then
+        # nodo non idle → tutto grigio con '@'
         echo -ne "\033[90m$(printf "%0.s@" $(seq 1 $length))\033[0m"
     else
-        (( mine_len > 0 )) && echo -ne "\033[31m$(printf "%0.s#" $(seq 1 $mine_len))"
-        (( others_len > 0 )) && echo -ne "\033[33m$(printf "%0.s+" $(seq 1 $others_len))"
-        (( free_len > 0 )) && echo -ne "\033[32m$(printf "%0.s-" $(seq 1 $free_len))"
+        (( mine_i   > 0 )) && echo -ne "\033[31m$(printf "%0.s#" $(seq 1 $mine_i))"
+        (( others_i > 0 )) && echo -ne "\033[33m$(printf "%0.s+" $(seq 1 $others_i))"
+        (( free_i   > 0 )) && echo -ne "\033[32m$(printf "%0.s-" $(seq 1 $free_i))"
         echo -ne "\033[0m"
     fi
-
-    # 🔧 usa printf qui per stampare la percentuale correttamente
-    printf "$close %3d%%" "$percent"
+    echo -ne "$close"
+    printf " %3d%%" "$percent"
 }
+
 
 
 # --- 4. Node table ---

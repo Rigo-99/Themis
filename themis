@@ -339,25 +339,22 @@ for NODE in $(printf "%s\n" "${NODES[@]}" | sort); do
         GRAY=1
     fi
 
+    # Print the name of the node
     printf "%-15s | " "$NODE"
+
+    # Print CPU info 
     progress_bar $CPU_MY $CPU_OTHERS $CPU_TOTAL $LEN_CPU $GRAY
     printf " (%3d/%-3d) | " "$CPU_USED" "$CPU_TOTAL"
 
-    if (( GPU_TOTAL > 0 )); then
-        progress_bar $GPU_MY $GPU_OTHERS $GPU_TOTAL $LEN_GPU $GRAY
-        printf " (%3d/%-3d) | " "$GPU_USED" "$GPU_TOTAL"
-    else
-	# check if this works even if base gpu is different from 8 ! 
-        if (( GRAY )); then
-            printf "\033[90m[   N/A   ]\033[0m %*s (  0/  0)" $((LEN_GPU-7)) ""
-        else
-            printf "[   N/A   ] %*s (  0/  0)" $((LEN_GPU-7)) ""
-        fi
-    fi
+    # Print GPU info
+    progress_bar $GPU_MY $GPU_OTHERS $GPU_TOTAL $LEN_GPU $GRAY
+    printf " (%3d/%-3d) | " "$GPU_USED" "$GPU_TOTAL"
 
+    # Print MEM info
     progress_bar $MEM_MY $MEM_OTHERS $MEM_TOTAL $BASE_MEM $GRAY
-    # translate in GB!
     printf " (%7d/%-7d) " "$MEM_USED" "$MEM_TOTAL"
+
+    # new line
     printf "\n"
 
 

@@ -1,33 +1,23 @@
 #!/bin/bash
 
-BASE_LEN=24
-USER_ME=$USER
 
 show_help() {
     cat << EOF
 Usage: $0 <partition>
 
 This script summarizes the resource usage of nodes in a given SLURM partition.
-It prints two tables:
-
-  1. Node-level usage:
-     - CPU and GPU usage bars
-     - Red    # = your jobs
-     - Yellow + = other users' jobs
-     - Green  - = free resources
-     - Gray   @ = non available resources
-     - If total resources exceed $BASE_LEN, bars are scaled to length $BASE_LEN
-       and displayed inside curly braces {} instead of square brackets [].
-
-  2. User-level usage:
-     - Number of jobs
-     - Total CPUs used
-     - Total GPUs used
+It prints a node-level usage table:
+- CPU, GPU and MEM usage bars:
+  - Red    # = your jobs
+  - Yellow + = other users' jobs
+  - Green  - = free resources
+  - Gray   @ = non available resources
+- If total resources exceed the dedicated space, bars are scaled
+  and displayed inside curly braces {} instead of square brackets [].
 
 Options:
   -h, --help    Show this help message
 
-Summarizes CPU/GPU usage per node and per user for a SLURM partition.
 EOF
     exit 0
 }
@@ -44,216 +34,313 @@ if [[ $1 == "-h" || $1 == "--help" ]]; then
     show_help
 fi
 
-PARTITION=$1
 
-# --- 1. Totals and states per node (CPU) ---
-declare -A TOTAL_CPU NODE_STATE
-NODES=()
-MAX_CPUS=0
+PARTITION=${1:-baies}
+USER_ME=$(whoami)
 
-while read NODE CPUSSTATE; do
-    NODE=${NODE%%.*}
-    # CPUSSTATE looks like: allocated/idle/other...
-    IFS='/' read -r ALLOC IDLE REST <<< "$CPUSSTATE"
-    TOTAL=$((ALLOC + IDLE + REST))
-    TOTAL_CPU[$NODE]=$TOTAL
-    (( TOTAL > MAX_CPUS )) && MAX_CPUS=$TOTAL
-    NODE_STATE[$NODE]="$(sinfo -N -n $NODE -o "%t" -h)"
-    NODES+=("$NODE")
-done < <(sinfo -p "$PARTITION" -N -O nodehost,cpusstate --noheader)
+BASE_CPU=24
+BASE_GPU=8
+BASE_MEM=10
 
-# --- GPU totals from sinfo ---
-declare -A TOTAL_GPU
-MAX_GPUS=0
-while read NODE CPUS GRES; do
-    [[ "$GRES" == "N/A" ]] && GRES=""
-    GPU_COUNT=0
-    if [[ $GRES =~ gpu:[A-Za-z0-9_-]*:([0-9]+) ]]; then
-        GPU_COUNT=${BASH_REMATCH[1]}
-    elif [[ $GRES =~ gpu:([0-9]+) ]]; then
-        GPU_COUNT=${BASH_REMATCH[1]}
-    fi
-    TOTAL_GPU[$NODE]=$GPU_COUNT
-    (( GPU_COUNT > MAX_GPUS )) && MAX_GPUS=$GPU_COUNT
-done < <(sinfo -h -p "$PARTITION" -N -o "%n %c %G")
+declare -A TOTAL_CPU USED_CPU MY_CPU
+declare -A TOTAL_MEM_MB USED_MEM_MB MY_MEM_MB
+declare -A TOTAL_GPU USED_GPU MY_GPU
+declare -A NODE_STATE
 
-LEN_CPU=$(( MAX_CPUS <= BASE_LEN ? MAX_CPUS : BASE_LEN ))
-LEN_GPU=$(( MAX_GPUS <= BASE_LEN ? MAX_GPUS : BASE_LEN ))
-
-# --- 2. Usage from squeue (GPU logic unchanged) ---
-declare -A USED_CPU USED_GPU MY_CPU MY_GPU
-declare -A USER_JOBS USER_CPU USER_GPU
-
-expand_nodes() {
-    local nodelist=$1
-    python3 -c "import re; import itertools; n='$nodelist';
-import re
-m=re.match(r'([^[]+)\[([^\]]+)\]', n)
-if not m: print(n); exit()
-prefix, inner=m.groups()
-parts=[]
-for group in inner.split(','):
-    if '-' in group:
-        a,b=group.split('-')
-        a,b=int(a),int(b)
-        width=len(group.split('-')[0])
-        for i in range(a,b+1): parts.append(f'{prefix}{i:0{width}d}')
-    else:
-        parts.append(f'{prefix}{group}')
-print('\n'.join(parts))"
+declare -A EXPANDED_CACHE
+expand_nodes_cached() {
+  local spec="$1"
+  if [[ ! "$spec" =~ \[ ]]; then
+    printf "%s\n" "$spec"
+    return
+  fi
+  if [[ -n "${EXPANDED_CACHE[$spec]:-}" ]]; then
+    printf "%s\n" "${EXPANDED_CACHE[$spec]}"
+    return
+  fi
+  local out
+  out=$(scontrol show hostnames "$spec" 2>/dev/null || true)
+  [[ -z "$out" ]] && out="$spec"
+  EXPANDED_CACHE[$spec]="$out"
+  printf "%s\n" "$out"
 }
 
-while read JOBID USER CPU GRES NODESTR; do
-    [[ -z "$NODESTR" || "$NODESTR" == "(null)" ]] && continue
-    GPU=0
-    if [[ $GRES != "N/A" && $GRES =~ gpu:([0-9]+) ]]; then
-        GPU=${BASH_REMATCH[1]}
-    fi
+mem_to_mb() {
+    local mem="$1"
+    local value unit
+    value="${mem%[GMK]}"
+    unit="${mem: -1}"
+    case "$unit" in
+        G|g) echo $((value * 1024)) ;;
+        M|m) echo "$value" ;;
+        K|k) echo $((value / 1024)) ;;
+        *) echo "Unknown unit $mem" >&2; return 1 ;;
+    esac
+}
 
-    NODES_LIST=($(expand_nodes "$NODESTR"))
-    N_NODES=${#NODES_LIST[@]}
 
-    CPU_PER_NODE=$((CPU / N_NODES))
-    GPU_PER_NODE=$((GPU / N_NODES))
 
-    if (( N_NODES > 1 )); then
-        SINFO=$(scontrol show job "$JOBID" 2>/dev/null)
-        if [[ $SINFO =~ TresPerNode=([^[:space:]]+) ]]; then
-            TRES=${BASH_REMATCH[1]}
-            [[ $TRES =~ cpu:([0-9]+) ]] && CPU_PER_NODE=${BASH_REMATCH[1]}
-            [[ $TRES =~ gpu:([0-9]+) ]] && GPU_PER_NODE=${BASH_REMATCH[1]}
-        fi
-    fi
-
-    for N in "${NODES_LIST[@]}"; do
-        USED_CPU[$N]=$(( ${USED_CPU[$N]:-0} + CPU_PER_NODE ))
-        USED_GPU[$N]=$(( ${USED_GPU[$N]:-0} + GPU_PER_NODE ))
-        if [[ $USER == $USER_ME ]]; then
-            MY_CPU[$N]=$(( ${MY_CPU[$N]:-0} + CPU_PER_NODE ))
-            MY_GPU[$N]=$(( ${MY_GPU[$N]:-0} + GPU_PER_NODE ))
-        fi
-    done
-
-    USER_JOBS[$USER]=$(( ${USER_JOBS[$USER]:-0} + 1 ))
-    USER_CPU[$USER]=$(( ${USER_CPU[$USER]:-0} + CPU ))
-    USER_GPU[$USER]=$(( ${USER_GPU[$USER]:-0} + GPU ))
-
-done < <(squeue -h -p "$PARTITION" -o "%A %u %C %b %R")
-
-# --- 3. Progress bar (new rounding logic) ---
+# ---  Progress bar function ---
 progress_bar() {
-    local mine=$1
-    local others=$2
-    local total=$3
-    local length=$4
-    local base_len=$5
-    local gray=$6  # 1 se nodo non idle (barra grigia)
+    local mine=$1       # risorse mie
+    local others=$2     # risorse altri
+    local total=$3      # totale disponibile
+    local length=$4     # lunghezza barra
+    local gray=${5:-0}
 
-    (( total == 0 )) && total=1  # evita divisioni per zero
+    local mine_len=0
+    local others_len=0
+    local free_len=0
 
-    # --- proporzioni float ---
-    local mine_f=$(echo "$mine * $length / $total" | bc -l)
-    local others_f=$(echo "$others * $length / $total" | bc -l)
-    local free_f=$(echo "$length - ($mine_f + $others_f)" | bc -l)
-
-    # --- arrotondamento all’intero più vicino ---
-    local mine_i=$(printf "%.0f" "$mine_f")
-    local others_i=$(printf "%.0f" "$others_f")
-    local free_i=$(printf "%.0f" "$free_f")
-
-    # --- forza almeno 1 al più piccolo non nullo ---
-    if (( mine_i == 0 && mine > 0 )); then mine_i=1; fi
-    if (( others_i == 0 && others > 0 )); then others_i=1; fi
-    if (( free_i == 0 && (total - mine - others) > 0 )); then free_i=1; fi
-
-    # --- normalizza la somma ---
-    local sum=$((mine_i + others_i + free_i))
-    local diff=$((sum - length))
-    if (( diff != 0 )); then
-        # correggi togliendo o aggiungendo 1 al segmento più grande
-        if (( diff > 0 )); then
-            # troppo lunga → togli al più grande
-            if (( mine_i >= others_i && mine_i >= free_i && mine_i > 0 )); then ((mine_i -= diff))
-            elif (( others_i >= mine_i && others_i >= free_i && others_i > 0 )); then ((others_i -= diff))
-            else ((free_i -= diff)); fi
+    if (( total > length )); then
+        # total > length: usa parentesi graffe e calcola proporzioni
+        local open="{"; local close="}"
+        
+        if (( total > 0 )); then
+            local free=$((total - mine - others))
+            
+            # calcola proporzioni con aritmetica intera (moltiplica per 1000 per precisione)
+            local m_f=$(( (mine * length * 1000) / total ))
+            local o_f=$(( (others * length * 1000) / total ))
+            local f_f=$(( (free * length * 1000) / total ))
+            
+            # arrotonda (aggiunge 500 prima di dividere per 1000)
+            mine_len=$(( (m_f > 0 && m_f < 1000) ? 1 : (m_f + 500) / 1000 ))
+            others_len=$(( (o_f > 0 && o_f < 1000) ? 1 : (o_f + 500) / 1000 ))
+            free_len=$(( (f_f > 0 && f_f < 1000) ? 1 : (f_f + 500) / 1000 ))
+            
+            # aggiusta per avere somma = length
+            local sum=$((mine_len + others_len + free_len))
+            local diff=$((length - sum))
+            
+            # aggiungi la differenza al segmento più grande
+            if (( mine_len >= others_len && mine_len >= free_len )); then
+                mine_len=$((mine_len + diff))
+            elif (( others_len >= free_len )); then
+                others_len=$((others_len + diff))
+            else
+                free_len=$((free_len + diff))
+            fi
         else
-            # troppo corta → aggiungi al più grande
-            (( diff = -diff ))
-            if (( mine_i >= others_i && mine_i >= free_i )); then ((mine_i += diff))
-            elif (( others_i >= mine_i && others_i >= free_i )); then ((others_i += diff))
-            else ((free_i += diff)); fi
+            free_len=$length
         fi
-    fi
 
-    # --- calcolo percentuale ---
-    local used=$((mine + others))
-    local percent=$((100 * used / total))
-
-    local open="["; local close="]"
-    (( total > base_len )) && open="{" && close="}"
-
-    echo -ne "$open"
-    if (( gray )); then
-        # nodo non idle → tutto grigio con '@'
-        echo -ne "\033[90m$(printf "%0.s@" $(seq 1 $length))\033[0m"
+        echo -ne "$open"
+        if (( gray )); then
+            printf "\033[90m%${length}s\033[0m" "" | tr ' ' '@'
+        else
+            (( mine_len   > 0 )) && printf "\033[31m%${mine_len}s" "" | tr ' ' '#'
+            (( others_len > 0 )) && printf "\033[33m%${others_len}s" "" | tr ' ' '+'
+            (( free_len   > 0 )) && printf "\033[32m%${free_len}s" "" | tr ' ' '-'
+            echo -ne "\033[0m"
+        fi
+        echo -ne "$close"
     else
-        (( mine_i   > 0 )) && echo -ne "\033[31m$(printf "%0.s#" $(seq 1 $mine_i))"
-        (( others_i > 0 )) && echo -ne "\033[33m$(printf "%0.s+" $(seq 1 $others_i))"
-        (( free_i   > 0 )) && echo -ne "\033[32m$(printf "%0.s-" $(seq 1 $free_i))"
-        echo -ne "\033[0m"
+        # total <= length: usa parentesi quadre, 1 carattere = 1 risorsa
+        local open="["; local close="]"
+        
+        mine_len=$mine
+        others_len=$others
+        free_len=$((total - mine - others))
+        
+        local bar_len=$((mine_len + others_len + free_len))
+        local padding=$((length - bar_len))
+        
+        echo -ne "$open"
+        if (( gray )); then
+            printf "\033[90m%${bar_len}s\033[0m" "" | tr ' ' '@'
+        else
+            (( mine_len   > 0 )) && printf "\033[31m%${mine_len}s" "" | tr ' ' '#'
+            (( others_len > 0 )) && printf "\033[33m%${others_len}s" "" | tr ' ' '+'
+            (( free_len   > 0 )) && printf "\033[32m%${free_len}s" "" | tr ' ' '-'
+            echo -ne "\033[0m"
+        fi
+        echo -ne "$close"
+        
+        # aggiungi spazi per arrivare a length caratteri totali
+        (( padding > 0 )) && printf "%${padding}s" ""
     fi
-    echo -ne "$close"
+
+    local used=$((mine + others))
+    local percent=0
+    (( total > 0 )) && percent=$((100 * used / total))
     printf " %3d%%" "$percent"
 }
 
 
+# --------------------------
+# 1. INFO NODI DA SINFO
+# --------------------------
+NODES=()
+SINFO_DATA=$(sinfo -p "$PARTITION" -N -O nodehost,cpusstate,allocmem,memory,statecompact:10,Gres:70 -h)
+while read -r NODE CPUSSTATE ALLOCMEM MEM STATE GRES; do
+  [[ -z "$NODE" ]] && continue
+  NODES+=("$NODE")
+  IFS='/' read -r CPUS_ALLOC CPUS_IDLE CPUS_OTHER CPUS_TOTAL <<< "$CPUSSTATE"
+  TOTAL_CPU[$NODE]=$((CPUS_ALLOC + CPUS_IDLE + CPUS_OTHER))
+  TOTAL_MEM_MB[$NODE]=$MEM
+  USED_MEM_MB[$NODE]=$ALLOCMEM
+  NODE_STATE[$NODE]=$STATE
+
+  # GPU totale
+  if [[ $GRES =~ gpu:[^:]+:([0-9]+) ]]; then
+    TOTAL_GPU[$NODE]=${BASH_REMATCH[1]}
+  elif [[ $GRES =~ gpu:([0-9]+) ]]; then
+    TOTAL_GPU[$NODE]=${BASH_REMATCH[1]}
+  else
+    TOTAL_GPU[$NODE]=0
+  fi
+done <<< "$SINFO_DATA"
+
+# --------------------------
+# 2. USO JOBS DA SQUEUE (OTTIMIZZATO)
+# --------------------------
+squeue_all=$(squeue -h -p "$PARTITION" -o "%A %u %C %b %D %m %R" 2>/dev/null || true)
+
+if [[ -n "$squeue_all" ]]; then
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+
+    # Split riga in campi
+    IFS=' ' read -r JOBID JOBUSER CPU_REQ GRES_FIELD NUMNODES MEM_REQ_RAW NODELIST_FIELD <<< "$line"
+
+    MEM_REQ=$(mem_to_mb "$MEM_REQ_RAW")
+
+    # Determina GPU dal campo GRES
+    GPU_REQ=0
+    if [[ $GRES_FIELD =~ gpu:([0-9]+) ]]; then GPU_REQ=${BASH_REMATCH[1]}; fi
+
+    # Se single-node
+    if (( NUMNODES == 1 )); then
+      NODE=$(expand_nodes_cached "$NODELIST_FIELD")
+      USED_CPU[$NODE]=$(( ${USED_CPU[$NODE]:-0} + CPU_REQ ))
+      USED_GPU[$NODE]=$(( ${USED_GPU[$NODE]:-0} + GPU_REQ ))
+      #USED_MEM_MB[$NODE]=$(( ${USED_MEM_MB[$NODE]:-0} + MEM_REQ ))
+
+      if [[ "$JOBUSER" == "$USER_ME" ]]; then
+        MY_CPU[$NODE]=$(( ${MY_CPU[$NODE]:-0} + CPU_REQ ))
+        MY_GPU[$NODE]=$(( ${MY_GPU[$NODE]:-0} + GPU_REQ ))
+        MY_MEM_MB[$NODE]=$(( ${MY_MEM_MB[$NODE]:-0} + MEM_REQ ))
+      fi
+
+    else
+      # Multi-nodo: usa scontrol per distribuire risorse
+      SINFO=$(scontrol show job "$JOBID" 2>/dev/null || true)
+
+      CPU_TOTAL=0
+      GPU_TOTAL=0
+      MEM_TOTAL=0
+      if [[ $SINFO =~ NumCPUs=([0-9]+) ]]; then CPU_TOTAL=${BASH_REMATCH[1]}; fi
+      if [[ $SINFO =~ TresPerNode=([^[:space:]]+) ]]; then
+        TRES=${BASH_REMATCH[1]}
+        if [[ $TRES =~ gpu:([0-9]+) ]]; then GPU_TOTAL=${BASH_REMATCH[1]}; fi
+      fi
+      if [[ $SINFO =~ AllocMem=([0-9]+) ]]; then MEM_TOTAL=${BASH_REMATCH[1]}; fi
+
+      mapfile -t JOB_NODES < <(expand_nodes_cached "$NODELIST_FIELD")
+      NN=${#JOB_NODES[@]}
+      (( NN == 0 )) && NN=1
+      CPU_PER_NODE=$(( CPU_TOTAL / NN ))
+      GPU_PER_NODE=$(( GPU_TOTAL / NN ))
+      MEM_PER_NODE=$(( MEM_TOTAL / NN ))
+
+      for nd in "${JOB_NODES[@]}"; do
+        USED_CPU[$nd]=$(( ${USED_CPU[$nd]:-0} + CPU_PER_NODE ))
+        USED_GPU[$nd]=$(( ${USED_GPU[$nd]:-0} + GPU_PER_NODE ))
+        USED_MEM_MB[$nd]=$(( ${USED_MEM_MB[$nd]:-0} + MEM_PER_NODE ))
+
+        if [[ "$JOBUSER" == "$USER_ME" ]]; then
+          MY_CPU[$nd]=$(( ${MY_CPU[$nd]:-0} + CPU_PER_NODE ))
+          MY_GPU[$nd]=$(( ${MY_GPU[$nd]:-0} + GPU_PER_NODE ))
+          MY_MEM_MB[$nd]=$(( ${MY_MEM_MB[$nd]:-0} + MEM_PER_NODE ))
+        fi
+      done
+    fi
+
+  done <<< "$squeue_all"
+fi
+
+
+
+
+
 
 # --- 4. Node table ---
+
+# get the maximum number of CPU and GPU
+
+MAX_CPU=${TOTAL_CPU[0]}; for v in "${TOTAL_CPU[@]}"; do ((v>MAX_CPU)) && MAX_CPU=$v; done
+MAX_GPU=${TOTAL_GPU[0]}; for v in "${TOTAL_GPU[@]}"; do ((v>MAX_GPU)) && MAX_GPU=$v; done
+
+LEN_CPU=$(( MAX_CPU < BASE_CPU ? MAX_CPU : BASE_CPU ))
+LEN_GPU=$(( MAX_GPU < BASE_GPU ? MAX_GPU : BASE_GPU ))
+
 CPU_COL=$((LEN_CPU+17))
 GPU_COL=$((LEN_GPU+17))
+MEM_COL=$((BASE_MEM+25))
 
-printf "\n=== NODES in partition %s ===\n\n" "$PARTITION"
-printf "%-15s | %-*s | %-*s\n" "NODE" $CPU_COL "CPU usage" $GPU_COL "GPU usage"
-printf "%s+%s+%s\n" \
-       "$(printf '%0.s-' $(seq 1 16))" \
-       "$(printf '%0.s-' $(seq 1 $((CPU_COL+2))))" \
-       "$(printf '%0.s-' $(seq 1 $((GPU_COL+2))))"
 
-for NODE in $(printf "%s\n" "${NODES[@]}" | sort); do
-    CPUS=${TOTAL_CPU[$NODE]:-0}
-    NGPU=${TOTAL_GPU[$NODE]:-0}
-    ALL_CPUS=${USED_CPU[$NODE]:-0}
-    ALL_GPUS=${USED_GPU[$NODE]:-0}
-    MYC=${MY_CPU[$NODE]:-0}
-    MYG=${MY_GPU[$NODE]:-0}
-    OTHERS_CPUS=$((ALL_CPUS - MYC))
-    OTHERS_GPUS=$((ALL_GPUS - MYG))
 
-    STATE=${NODE_STATE[$NODE]}
-    GRAY=0
-    [[ $STATE =~ drain|fail|down|unknown ]] && GRAY=1
 
-    printf "%-15s | " "$NODE"
-    progress_bar $MYC $OTHERS_CPUS $CPUS $LEN_CPU $BASE_LEN $GRAY
-    printf " (%3d/%-3d) | " "$ALL_CPUS" "$CPUS"
-    if (( NGPU > 0 )); then
-        progress_bar $MYG $OTHERS_GPUS $NGPU $LEN_GPU $BASE_LEN $GRAY
-        printf " (%3d/%-3d)\n" "$ALL_GPUS" "$NGPU"
-    else
-        printf "\n"
-    fi
-done
 
-# --- 5. User table ---
-printf "\n\n=== USERS active in partition %s ===\n\n" "$PARTITION"
-printf "%-15s | %-6s | %-8s | %-8s\n" "USER" "N_JOBS" "TOT_CPUS" "TOT_GPUS"
+
+printf "\n=== NODES in partition %s ===\n" "$PARTITION"
+printf "%-15s | %-*s | %-*s | %-*s\n" "NODE" $CPU_COL "CPU usage" $GPU_COL "GPU usage" $MEM_COL "MEM usage [MB]"
 printf "%s+%s+%s+%s\n" \
        "$(printf '%0.s-' $(seq 1 16))" \
-       "$(printf '%0.s-' $(seq 1 8))" \
-       "$(printf '%0.s-' $(seq 1 10))" \
-       "$(printf '%0.s-' $(seq 1 10))"
+       "$(printf '%0.s-' $(seq 1 $((CPU_COL+2))))" \
+       "$(printf '%0.s-' $(seq 1 $((GPU_COL+2))))" \
+       "$(printf '%0.s-' $(seq 1 $((MEM_COL+2))))"
 
-for U in $(printf "%s\n" "${!USER_JOBS[@]}" | sort); do
-    printf "%-15s | %6d | %8d | %8d\n" \
-        "$U" "${USER_JOBS[$U]}" "${USER_CPU[$U]}" "${USER_GPU[$U]}"
+
+
+for NODE in $(printf "%s\n" "${NODES[@]}" | sort); do
+    CPU_TOTAL=${TOTAL_CPU[$NODE]}
+    GPU_TOTAL=${TOTAL_GPU[$NODE]}
+    MEM_TOTAL=${TOTAL_MEM_MB[$NODE]}
+    CPU_USED=${USED_CPU[$NODE]:-0}
+    GPU_USED=${USED_GPU[$NODE]:-0}
+    MEM_USED=${USED_MEM_MB[$NODE]:-0}
+    CPU_MY=${MY_CPU[$NODE]:-0}
+    GPU_MY=${MY_GPU[$NODE]:-0}
+    MEM_MY=${MY_MEM_MB[$NODE]:-0}
+    CPU_OTHERS=$((CPU_USED - CPU_MY))
+    GPU_OTHERS=$((GPU_USED - GPU_MY))
+    MEM_OTHERS=$((MEM_USED - MEM_MY))
+
+
+    #echo "$n : CPU [$CPU_MY|$CPU_OTHERS|$CPU_TOTAL]  GPU [$GPU_MY|$GPU_OTHERS|$GPU_TOTAL]  MEM [$MEM_MY + $MEM_OTHERS = $MEM_USED|$MEM_TOTAL]"
+
+    # Nodo inattivo?
+    GRAY=0
+    STATE=${NODE_STATE[$NODE]}
+    # Se lo stato contiene uno dei flag "drain", "fail", "down", "unknown", allora grigio
+    if [[ $STATE =~ drain|drain*|fail|down|unknown ]]; then
+        GRAY=1
+    fi
+
+    printf "%-15s | " "$NODE"
+    progress_bar $CPU_MY $CPU_OTHERS $CPU_TOTAL $LEN_CPU $GRAY
+    printf " (%3d/%-3d) | " "$CPU_USED" "$CPU_TOTAL"
+
+    if (( GPU_TOTAL > 0 )); then
+        progress_bar $GPU_MY $GPU_OTHERS $GPU_TOTAL $LEN_GPU $GRAY
+        printf " (%3d/%-3d) | " "$GPU_USED" "$GPU_TOTAL"
+    else
+	# check if this works even if base gpu is different from 8 ! 
+        if (( GRAY )); then
+            printf "\033[90m[   N/A   ]\033[0m %*s (  0/  0)" $((LEN_GPU-7)) ""
+        else
+            printf "[   N/A   ] %*s (  0/  0)" $((LEN_GPU-7)) ""
+        fi
+    fi
+
+    progress_bar $MEM_MY $MEM_OTHERS $MEM_TOTAL $BASE_MEM $GRAY
+    # translate in GB!
+    printf " (%7d/%-7d) " "$MEM_USED" "$MEM_TOTAL"
+    printf "\n"
+
+
 done
+
+

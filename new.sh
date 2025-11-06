@@ -86,7 +86,7 @@ progress_bar() {
     local others=$2     # risorse altri
     local total=$3      # totale disponibile
     local length=$4     # lunghezza barra
-    local gray=${6:-0}
+    local gray=${5:-0}
 
     local mine_len=0
     local others_len=0

@@ -86,7 +86,7 @@ progress_bar() {
     local others=$2     # risorse altri
     local total=$3      # totale disponibile
     local length=$4     # lunghezza barra
-    local gray=${5:-0}
+    local gray=${6:-0}
 
     local mine_len=0
     local others_len=0
@@ -97,28 +97,31 @@ progress_bar() {
         local open="{"; local close="}"
         
         if (( total > 0 )); then
-            # calcola proporzioni reali
-            local mine_f=$(awk -v m=$mine -v l=$length -v t=$total 'BEGIN{print m*l/t}')
-            local others_f=$(awk -v o=$others -v l=$length -v t=$total 'BEGIN{print o*l/t}')
-            local free_f=$(awk -v f=$((total - mine - others)) -v l=$length -v t=$total 'BEGIN{print f*l/t}')
-
-            # arrotonda all'intero più vicino, min 1 se segmento >0
-            mine_len=$(awk "BEGIN{printf \"%d\", ($mine_f>0 && $mine_f<1)?1:($mine_f+0.5)}")
-            others_len=$(awk "BEGIN{printf \"%d\", ($others_f>0 && $others_f<1)?1:($others_f+0.5)}")
-            free_len=$(awk "BEGIN{printf \"%d\", ($free_f>0 && $free_f<1)?1:($free_f+0.5)}")
-
-            # assegna al segmento più grande la differenza per avere somma = length
-            local sum_len=$((mine_len + others_len + free_len))
-            local max_len=$mine_len
-            local max_idx=0
-            if (( others_len > max_len )); then max_len=$others_len; max_idx=1; fi
-            if (( free_len > max_len )); then max_len=$free_len; max_idx=2; fi
-
-            case $max_idx in
-                0) mine_len=$((mine_len + length - sum_len)) ;;
-                1) others_len=$((others_len + length - sum_len)) ;;
-                2) free_len=$((free_len + length - sum_len)) ;;
-            esac
+            # calcola tutte le proporzioni in una sola chiamata awk
+            read mine_len others_len free_len < <(awk -v m=$mine -v o=$others -v t=$total -v l=$length 'BEGIN{
+                free = t - m - o
+                m_f = m * l / t
+                o_f = o * l / t
+                f_f = free * l / t
+                
+                m_len = (m_f > 0 && m_f < 1) ? 1 : int(m_f + 0.5)
+                o_len = (o_f > 0 && o_f < 1) ? 1 : int(o_f + 0.5)
+                f_len = (f_f > 0 && f_f < 1) ? 1 : int(f_f + 0.5)
+                
+                sum = m_len + o_len + f_len
+                
+                # trova il massimo e aggiusta
+                max_len = m_len
+                max_idx = 0
+                if (o_len > max_len) { max_len = o_len; max_idx = 1 }
+                if (f_len > max_len) { max_len = f_len; max_idx = 2 }
+                
+                if (max_idx == 0) m_len += l - sum
+                else if (max_idx == 1) o_len += l - sum
+                else f_len += l - sum
+                
+                print m_len, o_len, f_len
+            }')
         else
             free_len=$length
         fi
@@ -126,11 +129,11 @@ progress_bar() {
         echo -ne "$open"
         if (( gray )); then
             echo -ne "\033[90m"
-            echo -ne "$(printf "%0.s@" $(seq 1 $length))"
+            printf "%${length}s" "" | tr ' ' '@'
         else
-            (( mine_len   > 0 )) && echo -ne "\033[31m$(printf "%0.s#" $(seq 1 $mine_len))"
-            (( others_len > 0 )) && echo -ne "\033[33m$(printf "%0.s+" $(seq 1 $others_len))"
-            (( free_len   > 0 )) && echo -ne "\033[32m$(printf "%0.s-" $(seq 1 $free_len))"
+            (( mine_len   > 0 )) && printf "\033[31m%${mine_len}s\033[0m" "" | tr ' ' '#'
+            (( others_len > 0 )) && printf "\033[33m%${others_len}s\033[0m" "" | tr ' ' '+'
+            (( free_len   > 0 )) && printf "\033[32m%${free_len}s\033[0m" "" | tr ' ' '-'
         fi
         echo -ne "\033[0m$close"
     else
@@ -147,11 +150,11 @@ progress_bar() {
         echo -ne "$open"
         if (( gray )); then
             echo -ne "\033[90m"
-            echo -ne "$(printf "%0.s@" $(seq 1 $bar_len))"
+            printf "%${bar_len}s" "" | tr ' ' '@'
         else
-            (( mine_len   > 0 )) && echo -ne "\033[31m$(printf "%0.s#" $(seq 1 $mine_len))"
-            (( others_len > 0 )) && echo -ne "\033[33m$(printf "%0.s+" $(seq 1 $others_len))"
-            (( free_len   > 0 )) && echo -ne "\033[32m$(printf "%0.s-" $(seq 1 $free_len))"
+            (( mine_len   > 0 )) && printf "\033[31m%${mine_len}s\033[0m" "" | tr ' ' '#'
+            (( others_len > 0 )) && printf "\033[33m%${others_len}s\033[0m" "" | tr ' ' '+'
+            (( free_len   > 0 )) && printf "\033[32m%${free_len}s\033[0m" "" | tr ' ' '-'
         fi
         echo -ne "\033[0m$close"
         
@@ -164,8 +167,6 @@ progress_bar() {
     (( total > 0 )) && percent=$((100 * used / total))
     printf " %3d%%" "$percent"
 }
-
-
 
 
 
@@ -287,7 +288,7 @@ MEM_COL=$((BASE_MEM+25))
 
 
 printf "\n=== NODES in partition %s ===\n" "$PARTITION"
-printf "%-15s | %-*s | %-*s | %-*s\n" "NODE" $CPU_COL "CPU usage" $GPU_COL "GPU usage" $MEM_COL "MEM usage"
+printf "%-15s | %-*s | %-*s | %-*s\n" "NODE" $CPU_COL "CPU usage" $GPU_COL "GPU usage" $MEM_COL "MEM usage [MB]"
 printf "%s+%s+%s+%s\n" \
        "$(printf '%0.s-' $(seq 1 16))" \
        "$(printf '%0.s-' $(seq 1 $((CPU_COL+2))))" \

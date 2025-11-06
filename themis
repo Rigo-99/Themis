@@ -80,6 +80,32 @@ mem_to_mb() {
 
 
 
+extract_gpu_number() {
+    local gres="$1"
+    
+    # Cerca gpu: seguito da numero tra parentesi: gpu:8(...)
+    if [[ $gres =~ gpu:([0-9]+)\( ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return
+    fi
+    
+    # Cerca gpu:tipo:numero: gpu:A40:2
+    if [[ $gres =~ gpu:[^:]+:([0-9]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return
+    fi
+    
+    # Cerca gpu:numero: gpu:2
+    if [[ $gres =~ gpu:([0-9]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return
+    fi
+    
+    # Nessuna GPU trovata
+    echo "0"
+}
+
+
 # ---  Progress bar function ---
 progress_bar() {
     local mine=$1       # risorse mie
@@ -182,14 +208,8 @@ while read -r NODE CPUSSTATE ALLOCMEM MEM STATE GRES; do
   USED_MEM_MB[$NODE]=$ALLOCMEM
   NODE_STATE[$NODE]=$STATE
 
-  # GPU totale
-  if [[ $GRES =~ gpu:[^:]+:([0-9]+) ]]; then
-    TOTAL_GPU[$NODE]=${BASH_REMATCH[1]}
-  elif [[ $GRES =~ gpu:([0-9]+) ]]; then
-    TOTAL_GPU[$NODE]=${BASH_REMATCH[1]}
-  else
-    TOTAL_GPU[$NODE]=0
-  fi
+  TOTAL_GPU[$NODE]=$(extract_gpu_number "$GRES")
+
 done <<< "$SINFO_DATA"
 
 # --------------------------

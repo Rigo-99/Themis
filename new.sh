@@ -97,45 +97,44 @@ progress_bar() {
         local open="{"; local close="}"
         
         if (( total > 0 )); then
-            # calcola tutte le proporzioni in una sola chiamata awk
-            read mine_len others_len free_len < <(awk -v m=$mine -v o=$others -v t=$total -v l=$length 'BEGIN{
-                free = t - m - o
-                m_f = m * l / t
-                o_f = o * l / t
-                f_f = free * l / t
-                
-                m_len = (m_f > 0 && m_f < 1) ? 1 : int(m_f + 0.5)
-                o_len = (o_f > 0 && o_f < 1) ? 1 : int(o_f + 0.5)
-                f_len = (f_f > 0 && f_f < 1) ? 1 : int(f_f + 0.5)
-                
-                sum = m_len + o_len + f_len
-                
-                # trova il massimo e aggiusta
-                max_len = m_len
-                max_idx = 0
-                if (o_len > max_len) { max_len = o_len; max_idx = 1 }
-                if (f_len > max_len) { max_len = f_len; max_idx = 2 }
-                
-                if (max_idx == 0) m_len += l - sum
-                else if (max_idx == 1) o_len += l - sum
-                else f_len += l - sum
-                
-                print m_len, o_len, f_len
-            }')
+            local free=$((total - mine - others))
+            
+            # calcola proporzioni con aritmetica intera (moltiplica per 1000 per precisione)
+            local m_f=$(( (mine * length * 1000) / total ))
+            local o_f=$(( (others * length * 1000) / total ))
+            local f_f=$(( (free * length * 1000) / total ))
+            
+            # arrotonda (aggiunge 500 prima di dividere per 1000)
+            mine_len=$(( (m_f > 0 && m_f < 1000) ? 1 : (m_f + 500) / 1000 ))
+            others_len=$(( (o_f > 0 && o_f < 1000) ? 1 : (o_f + 500) / 1000 ))
+            free_len=$(( (f_f > 0 && f_f < 1000) ? 1 : (f_f + 500) / 1000 ))
+            
+            # aggiusta per avere somma = length
+            local sum=$((mine_len + others_len + free_len))
+            local diff=$((length - sum))
+            
+            # aggiungi la differenza al segmento più grande
+            if (( mine_len >= others_len && mine_len >= free_len )); then
+                mine_len=$((mine_len + diff))
+            elif (( others_len >= free_len )); then
+                others_len=$((others_len + diff))
+            else
+                free_len=$((free_len + diff))
+            fi
         else
             free_len=$length
         fi
 
         echo -ne "$open"
         if (( gray )); then
-            echo -ne "\033[90m"
-            printf "%${length}s" "" | tr ' ' '@'
+            printf "\033[90m%${length}s\033[0m" "" | tr ' ' '@'
         else
-            (( mine_len   > 0 )) && printf "\033[31m%${mine_len}s\033[0m" "" | tr ' ' '#'
-            (( others_len > 0 )) && printf "\033[33m%${others_len}s\033[0m" "" | tr ' ' '+'
-            (( free_len   > 0 )) && printf "\033[32m%${free_len}s\033[0m" "" | tr ' ' '-'
+            (( mine_len   > 0 )) && printf "\033[31m%${mine_len}s" "" | tr ' ' '#'
+            (( others_len > 0 )) && printf "\033[33m%${others_len}s" "" | tr ' ' '+'
+            (( free_len   > 0 )) && printf "\033[32m%${free_len}s" "" | tr ' ' '-'
+            echo -ne "\033[0m"
         fi
-        echo -ne "\033[0m$close"
+        echo -ne "$close"
     else
         # total <= length: usa parentesi quadre, 1 carattere = 1 risorsa
         local open="["; local close="]"
@@ -149,14 +148,14 @@ progress_bar() {
         
         echo -ne "$open"
         if (( gray )); then
-            echo -ne "\033[90m"
-            printf "%${bar_len}s" "" | tr ' ' '@'
+            printf "\033[90m%${bar_len}s\033[0m" "" | tr ' ' '@'
         else
-            (( mine_len   > 0 )) && printf "\033[31m%${mine_len}s\033[0m" "" | tr ' ' '#'
-            (( others_len > 0 )) && printf "\033[33m%${others_len}s\033[0m" "" | tr ' ' '+'
-            (( free_len   > 0 )) && printf "\033[32m%${free_len}s\033[0m" "" | tr ' ' '-'
+            (( mine_len   > 0 )) && printf "\033[31m%${mine_len}s" "" | tr ' ' '#'
+            (( others_len > 0 )) && printf "\033[33m%${others_len}s" "" | tr ' ' '+'
+            (( free_len   > 0 )) && printf "\033[32m%${free_len}s" "" | tr ' ' '-'
+            echo -ne "\033[0m"
         fi
-        echo -ne "\033[0m$close"
+        echo -ne "$close"
         
         # aggiungi spazi per arrivare a length caratteri totali
         (( padding > 0 )) && printf "%${padding}s" ""
@@ -167,8 +166,6 @@ progress_bar() {
     (( total > 0 )) && percent=$((100 * used / total))
     printf " %3d%%" "$percent"
 }
-
-
 
 
 # --------------------------

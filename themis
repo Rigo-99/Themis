@@ -29,25 +29,11 @@ if [[ $# -eq 0 ]]; then
     exit 1
 fi
 
-
 if [[ $1 == "-h" || $1 == "--help" ]]; then
     show_help
 fi
 
-
-PARTITION=${1:-baies}
-USER_ME=$(whoami)
-
-BASE_CPU=24
-BASE_GPU=8
-BASE_MEM=10
-
-declare -A TOTAL_CPU USED_CPU MY_CPU
-declare -A TOTAL_MEM_MB USED_MEM_MB MY_MEM_MB
-declare -A TOTAL_GPU USED_GPU MY_GPU
-declare -A NODE_STATE
-
-declare -A EXPANDED_CACHE
+# ---  get nodes list from multiple compact nodes format function ---
 expand_nodes_cached() {
   local spec="$1"
   if [[ ! "$spec" =~ \[ ]]; then
@@ -65,6 +51,7 @@ expand_nodes_cached() {
   printf "%s\n" "$out"
 }
 
+# --- turn the memory with unit in M without unit ---
 mem_to_mb() {
     local mem="$1"
     local value unit
@@ -78,30 +65,59 @@ mem_to_mb() {
     esac
 }
 
-
-
+# --- get GPU number from GRES string ---
 extract_gpu_number() {
     local gres="$1"
     
-    # Cerca gpu: seguito da numero tra parentesi: gpu:8(...)
+    # try gpu: followed by number and brackets: gpu:8(...)
     if [[ $gres =~ gpu:([0-9]+)\( ]]; then
         echo "${BASH_REMATCH[1]}"
         return
     fi
     
-    # Cerca gpu:tipo:numero: gpu:A40:2
+    # try gpu:type:number: gpu:A40:2
     if [[ $gres =~ gpu:[^:]+:([0-9]+) ]]; then
         echo "${BASH_REMATCH[1]}"
         return
     fi
     
-    # Cerca gpu:numero: gpu:2
+    # try gpu:number: gpu:2
     if [[ $gres =~ gpu:([0-9]+) ]]; then
         echo "${BASH_REMATCH[1]}"
         return
     fi
     
-    # Nessuna GPU trovata
+    # No GPU found
+    echo "0"
+}
+
+# ---  Get memory from scontrol string ---
+extract_req_mem() {
+    local info="$1"
+    local mem=""
+
+    # try ReqTRES=...mem=...
+    if [[ $info =~ ReqTRES=[^[:space:]]*mem=([^,[:space:]]+) ]]; then
+        mem="${BASH_REMATCH[1]}"
+        echo "$mem"
+        return
+    fi
+
+    # try ReqMem=...
+    if [[ $info =~ ReqMem=([^[:space:]]+) ]]; then
+        mem="${BASH_REMATCH[1]}"
+        echo "$mem"
+        return
+    fi
+
+    # try MinMemoryNode=...
+    if [[ $info =~ MinMemoryNode=([^[:space:]]+) ]]; then
+        mem="${BASH_REMATCH[1]}"
+        echo "$mem"
+        return
+    fi
+
+    # No memory found
     echo "0"
 }
 
@@ -194,9 +210,31 @@ progress_bar() {
 }
 
 
+
+
 # --------------------------
-# 1. INFO NODI DA SINFO
+# INITIALIZE VARIABLES
 # --------------------------
+
+PARTITION=${1:-baies}
+USER_ME=$(whoami)
+
+BASE_CPU=24
+BASE_GPU=8
+BASE_MEM=10
+
+declare -A TOTAL_CPU USED_CPU MY_CPU
+declare -A TOTAL_MEM_MB USED_MEM_MB MY_MEM_MB
+declare -A TOTAL_GPU USED_GPU MY_GPU
+declare -A NODE_STATE
+
+declare -A EXPANDED_CACHE
+
+
+# --------------------------
+# GET NODES INFO FROM "sinfo"
+# --------------------------
+
 NODES=()
 SINFO_DATA=$(sinfo -p "$PARTITION" -N -O nodehost,cpusstate,allocmem,memory,statecompact:10,Gres:70 -h)
 while read -r NODE CPUSSTATE ALLOCMEM MEM STATE GRES; do
@@ -212,39 +250,53 @@ while read -r NODE CPUSSTATE ALLOCMEM MEM STATE GRES; do
 
 done <<< "$SINFO_DATA"
 
+
 # --------------------------
-# 2. USO JOBS DA SQUEUE (OTTIMIZZATO)
+# GET JOB INFOS FROM "squeue"
 # --------------------------
+
 squeue_all=$(squeue -h -p "$PARTITION" -o "%A %u %C %b %D %m %R" 2>/dev/null || true)
 
 if [[ -n "$squeue_all" ]]; then
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
 
-    # Split riga in campi
+    # Split row
     IFS=' ' read -r JOBID JOBUSER CPU_REQ GRES_FIELD NUMNODES MEM_REQ_RAW NODELIST_FIELD <<< "$line"
 
+    # Convert memory
     MEM_REQ=$(mem_to_mb "$MEM_REQ_RAW")
 
-    # Determina GPU dal campo GRES
+    # Determine GPU number from GRES field
     GPU_REQ=0
     if [[ $GRES_FIELD =~ gpu:([0-9]+) ]]; then GPU_REQ=${BASH_REMATCH[1]}; fi
 
-    # Se single-node
+    # If single-node
     if (( NUMNODES == 1 )); then
       NODE=$(expand_nodes_cached "$NODELIST_FIELD")
       USED_CPU[$NODE]=$(( ${USED_CPU[$NODE]:-0} + CPU_REQ ))
       USED_GPU[$NODE]=$(( ${USED_GPU[$NODE]:-0} + GPU_REQ ))
-      #USED_MEM_MB[$NODE]=$(( ${USED_MEM_MB[$NODE]:-0} + MEM_REQ ))
 
+      # If the user is me
       if [[ "$JOBUSER" == "$USER_ME" ]]; then
         MY_CPU[$NODE]=$(( ${MY_CPU[$NODE]:-0} + CPU_REQ ))
         MY_GPU[$NODE]=$(( ${MY_GPU[$NODE]:-0} + GPU_REQ ))
+        #MY_MEM_MB[$NODE]=$(( ${MY_MEM_MB[$NODE]:-0} + MEM_REQ ))
+
+
+        info=$(scontrol show job "$JOBID" 2>/dev/null || true)
+        mem=$(extract_req_mem "$info")
+        MEM_REQ=$(mem_to_mb "$mem")
+        echo $mem '->' $MEM_REQ '\n'
+
         MY_MEM_MB[$NODE]=$(( ${MY_MEM_MB[$NODE]:-0} + MEM_REQ ))
+
+
+
       fi
 
     else
-      # Multi-nodo: usa scontrol per distribuire risorse
+      # Multi-node: use scontrol
       SINFO=$(scontrol show job "$JOBID" 2>/dev/null || true)
 
       CPU_TOTAL=0
@@ -280,15 +332,11 @@ if [[ -n "$squeue_all" ]]; then
   done <<< "$squeue_all"
 fi
 
-
-
-
-
-
-# --- 4. Node table ---
+# --------------------------
+# DRAW THE TABLE WITH USAGES
+# --------------------------
 
 # get the maximum number of CPU and GPU
-
 MAX_CPU=${TOTAL_CPU[0]}; for v in "${TOTAL_CPU[@]}"; do ((v>MAX_CPU)) && MAX_CPU=$v; done
 MAX_GPU=${TOTAL_GPU[0]}; for v in "${TOTAL_GPU[@]}"; do ((v>MAX_GPU)) && MAX_GPU=$v; done
 
@@ -298,10 +346,6 @@ LEN_GPU=$(( MAX_GPU < BASE_GPU ? MAX_GPU : BASE_GPU ))
 CPU_COL=$((LEN_CPU+17))
 GPU_COL=$((LEN_GPU+17))
 MEM_COL=$((BASE_MEM+25))
-
-
-
-
 
 
 printf "\n=== NODES in partition %s ===\n" "$PARTITION"
@@ -328,13 +372,11 @@ for NODE in $(printf "%s\n" "${NODES[@]}" | sort); do
     GPU_OTHERS=$((GPU_USED - GPU_MY))
     MEM_OTHERS=$((MEM_USED - MEM_MY))
 
-
     #echo "$n : CPU [$CPU_MY|$CPU_OTHERS|$CPU_TOTAL]  GPU [$GPU_MY|$GPU_OTHERS|$GPU_TOTAL]  MEM [$MEM_MY + $MEM_OTHERS = $MEM_USED|$MEM_TOTAL]"
 
-    # Nodo inattivo?
+    # Check node inactivity
     GRAY=0
     STATE=${NODE_STATE[$NODE]}
-    # Se lo stato contiene uno dei flag "drain", "fail", "down", "unknown", allora grigio
     if [[ $STATE =~ drain|drain*|fail|down|unknown ]]; then
         GRAY=1
     fi

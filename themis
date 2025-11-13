@@ -241,8 +241,8 @@ while read -r NODE CPUSSTATE ALLOCMEM MEM STATE GRES; do
   [[ -z "$NODE" ]] && continue
   NODES+=("$NODE")
   IFS='/' read -r CPUS_ALLOC CPUS_IDLE CPUS_OTHER CPUS_TOTAL <<< "$CPUSSTATE"
-  TOTAL_CPU[$NODE]=$((CPUS_ALLOC + CPUS_IDLE + CPUS_OTHER))
   USED_CPU[$NODE]=$CPUS_ALLOC
+  TOTAL_CPU[$NODE]=$((CPUS_ALLOC + CPUS_IDLE + CPUS_OTHER))
   TOTAL_MEM_MB[$NODE]=$MEM
   USED_MEM_MB[$NODE]=$ALLOCMEM
   NODE_STATE[$NODE]=$STATE
@@ -318,7 +318,6 @@ if [[ -n "$squeue_all" ]]; then
       MEM_PER_NODE=$(( MEM_TOTAL / NN ))
 
       for nd in "${JOB_NODES[@]}"; do
-        USED_CPU[$nd]=$(( ${USED_CPU[$nd]:-0} + CPU_PER_NODE ))
         USED_GPU[$nd]=$(( ${USED_GPU[$nd]:-0} + GPU_PER_NODE ))
         USED_MEM_MB[$nd]=$(( ${USED_MEM_MB[$nd]:-0} + MEM_PER_NODE ))
 

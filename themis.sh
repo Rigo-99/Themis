@@ -3,7 +3,7 @@
 
 show_help() {
     cat << EOF
-Usage: $0 <partition>
+Usage: $0 [OPTIONS] <partition>
 
 This script summarizes the resource usage of nodes in a given SLURM partition.
 It prints a node-level usage table:
@@ -16,7 +16,8 @@ It prints a node-level usage table:
   and displayed inside curly braces {} instead of square brackets [].
 
 Options:
-  -h, --help    Show this help message
+  -u, --user USER    Specify user to investigate (default: current user)
+  -h, --help         Show this help message
 
 EOF
     exit 0
@@ -29,8 +30,41 @@ if [[ $# -eq 0 ]]; then
     exit 1
 fi
 
-if [[ $1 == "-h" || $1 == "--help" ]]; then
-    show_help
+# Initialize user to current user
+USER_TO_INVESTIGATE=$(whoami)
+
+# Parse optional flags
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      show_help
+      ;;
+    -u|--user)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: -u/--user requires a user name argument."
+        exit 1
+      fi
+      USER_TO_INVESTIGATE="$2"
+      shift 2
+      ;;
+    -*)
+      echo "Error: Unknown option '$1'"
+      echo "Try '$0 --help' for usage."
+      exit 1
+      ;;
+    *)
+      # This should be the partition name
+      PARTITION="$1"
+      shift
+      ;;
+  esac
+done
+
+# Check if partition was provided
+if [[ -z "$PARTITION" ]]; then
+  echo "Error: partition name required."
+  echo "Try '$0 --help' for usage."
+  exit 1
 fi
 
 # ---  Get nodes list from multiple compact nodes format function ---
@@ -216,8 +250,7 @@ progress_bar() {
 # INITIALIZE VARIABLES
 # --------------------------
 
-PARTITION=${1:-baies}
-USER_ME=$(whoami)
+PARTITION_TO_CHECK=${PARTITION:-baies}
 
 BASE_CPU=24
 BASE_GPU=8
@@ -236,7 +269,7 @@ declare -A EXPANDED_CACHE
 # --------------------------
 
 NODES=()
-SINFO_DATA=$(sinfo -p "$PARTITION" -N -O nodehost,cpusstate,allocmem,memory,statecompact:10,Gres:70 -h)
+SINFO_DATA=$(sinfo -p "$PARTITION_TO_CHECK" -N -O nodehost,cpusstate,allocmem,memory,statecompact:10,Gres:70 -h)
 while read -r NODE CPUSSTATE ALLOCMEM MEM STATE GRES; do
   [[ -z "$NODE" ]] && continue
   NODES+=("$NODE")
@@ -256,7 +289,7 @@ done <<< "$SINFO_DATA"
 # GET JOB INFOS FROM "squeue"
 # --------------------------
 
-squeue_all=$(squeue -h -p "$PARTITION" -o "%A %u %C %b %D %m %R" 2>/dev/null || true)
+squeue_all=$(squeue -h -p "$PARTITION_TO_CHECK" -o "%A %u %C %b %D %m %R" 2>/dev/null || true)
 
 if [[ -n "$squeue_all" ]]; then
   while IFS= read -r line; do
@@ -277,8 +310,8 @@ if [[ -n "$squeue_all" ]]; then
       NODE=$(expand_nodes_cached "$NODELIST_FIELD")
       USED_GPU[$NODE]=$(( ${USED_GPU[$NODE]:-0} + GPU_REQ ))
 
-      # If the user is me
-      if [[ "$JOBUSER" == "$USER_ME" ]]; then
+      # If the user matches the one we're investigating
+      if [[ "$JOBUSER" == "$USER_TO_INVESTIGATE" ]]; then
         # Memory has to be investigated through scontrol
         info=$(scontrol show job "$JOBID" 2>/dev/null || true)
         mem=$(extract_req_mem "$info")
@@ -314,7 +347,7 @@ if [[ -n "$squeue_all" ]]; then
       for nd in "${JOB_NODES[@]}"; do
         USED_GPU[$nd]=$(( ${USED_GPU[$nd]:-0} + GPU_PER_NODE ))
 
-        if [[ "$JOBUSER" == "$USER_ME" ]]; then
+        if [[ "$JOBUSER" == "$USER_TO_INVESTIGATE" ]]; then
           MY_CPU[$nd]=$(( ${MY_CPU[$nd]:-0} + CPU_PER_NODE ))
           MY_GPU[$nd]=$(( ${MY_GPU[$nd]:-0} + GPU_PER_NODE ))
           MY_MEM_MB[$nd]=$(( ${MY_MEM_MB[$nd]:-0} + MEM_PER_NODE ))
@@ -342,7 +375,7 @@ GPU_COL=$((LEN_GPU+17))
 MEM_COL=$((BASE_MEM+25))
 
 # Print the header
-printf "\n=== NODES in partition %s ===\n" "$PARTITION"
+printf "\n=== NODES in partition %s (user: %s) ===\n" "$PARTITION_TO_CHECK" "$USER_TO_INVESTIGATE"
 printf "%-15s | %-*s | %-*s | %-*s\n" "NODE" $CPU_COL "CPU usage" $GPU_COL "GPU usage" $MEM_COL "MEM usage [MB]"
 printf "%s+%s+%s+%s\n" \
        "$(printf '%0.s-' $(seq 1 16))" \
@@ -392,7 +425,6 @@ for NODE in $(printf "%s\n" "${NODES[@]}" | sort); do
 
   # new line
   printf "\n"
-
 
 done
 

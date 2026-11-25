@@ -329,13 +329,20 @@ if [[ -n "$squeue_all" ]]; then
       CPU_TOTAL=0
       GPU_TOTAL=0
       MEM_TOTAL=0
-      # !!! this scraping still have to be checked and placed in functions
-      if [[ $SINFO =~ NumCPUs=([0-9]+) ]]; then CPU_TOTAL=${BASH_REMATCH[1]}; fi
-      if [[ $SINFO =~ TresPerNode=([^[:space:]]+) ]]; then
-        TRES=${BASH_REMATCH[1]}
-        if [[ $TRES =~ gpu:([0-9]+) ]]; then GPU_TOTAL=${BASH_REMATCH[1]}; fi
+
+      # ReqTRES reports JOB-WIDE totals (cpu, mem, gres/gpu), unlike
+      # TresPerNode/AllocMem which are per-node or unavailable here.
+      if [[ $SINFO =~ ReqTRES=([^[:space:]]+) ]]; then
+        REQTRES=${BASH_REMATCH[1]}
+        if [[ $REQTRES =~ cpu=([0-9]+) ]]; then CPU_TOTAL=${BASH_REMATCH[1]}; fi
+        if [[ $REQTRES =~ gres/gpu=([0-9]+) ]]; then GPU_TOTAL=${BASH_REMATCH[1]}; fi
+        if [[ $REQTRES =~ mem=([^,[:space:]]+) ]]; then MEM_TOTAL=$(mem_to_mb "${BASH_REMATCH[1]}"); fi
       fi
-      if [[ $SINFO =~ AllocMem=([0-9]+) ]]; then MEM_TOTAL=${BASH_REMATCH[1]}; fi
+
+      # Fallback to NumCPUs if ReqTRES didn't provide a CPU count
+      if (( CPU_TOTAL == 0 )) && [[ $SINFO =~ NumCPUs=([0-9]+) ]]; then
+        CPU_TOTAL=${BASH_REMATCH[1]}
+      fi
 
       mapfile -t JOB_NODES < <(expand_nodes_cached "$NODELIST_FIELD")
       NN=${#JOB_NODES[@]}

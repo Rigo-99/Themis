@@ -15,13 +15,14 @@ chmod +x themis.sh
 ## Usage
 
 ```bash
-./themis.sh <partition>
+./themis.sh [-u USER] <partition>
 ```
 
 **Arguments:**
 - `<partition>` - Name of the SLURM partition to monitor
 
 **Options:**
+- `-u, --user USER` - Highlight a specific user's resource usage in red (default: `$USER`, i.e. yourself). Use this to inspect another user's allocations.
 - `-h, --help` - Display help message
 
 ### Output
@@ -54,3 +55,13 @@ Each resource bar uses color-coded symbols to indicate allocation status:
 - **Personal Job Tracking**: Easily identify where your jobs are running
 - **Partition-Wide Visibility**: Monitor entire partition utilization at a glance
 - **Scalable Visualization**: Automatically adjusts display for partitions with varying resource counts
+
+### Shell Alias
+
+If you regularly check the same partition, you can set up a shell alias so you don't have to type the full path and partition name every time. Add the following line to your `~/.bashrc` (or `~/.zshrc`) file, replacing `your_alias`, `/path/to/themis.sh` and `your_partition` with your own values:
+
+```bash
+alias your_alias='/path/to/themis.sh your_partition'
+```
+
+Then reload your shell configuration (`source ~/.bashrc`) and simply run `your_alias` (optionally with `-u USER`) to check the partition.
